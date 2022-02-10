@@ -1,0 +1,54 @@
+name: 'Deploy'
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: 'Deploy'
+    runs-on: ubuntu-latest
+    steps:
+
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Install deps
+      run: sudo apt update && sudo apt install -y curl jq
+
+    - name: Install kubectl
+      run: |
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        curl -LO "https://dl.k8s.io/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl.sha256"
+        echo "$(<kubectl.sha256)  kubectl" | sha256sum --check
+        mkdir -p ~/.bin
+        mv kubectl ~/.bin/kubectl
+        chmod a+x ~/.bin/kubectl
+        rm -f kubectl.sha256
+
+    - name: Set up kubectl
+      run: |
+        mkdir -p ~/.kube
+        curl -o outputs.json --header "Authorization: Bearer $TOKEN" --header "Content-Type: application/vnd.api+json" https://app.terraform.io/api/v2/workspaces/ws-PtwVs5uBwPs2TKqm/current-state-version?include=outputs
+        echo -n "$(jq -r '.included[] | select (.attributes.name == "ci_user_key_pem") | .attributes.value' outputs.json)" > ~/.kube/key.pem
+        echo -n "$(jq -r '.included[] | select (.attributes.name == "ci_user_cert_pem") | .attributes.value' outputs.json)" > ~/.kube/cert.pem
+        echo -n "${KUBE_CERTIFICATE}" > ~/.kube/ca.pem
+        touch ~/.kube/config
+        ~/.bin/kubectl config set-cluster default --certificate-authority=$HOME/.kube/ca.pem --embed-certs=true --server=${KUBE_HOST}
+        ~/.bin/kubectl config set-credentials default --client-certificate=$HOME/.kube/cert.pem --client-key=$HOME/.kube/key.pem --embed-certs=true
+        ~/.bin/kubectl config set-context default --cluster=default --user=default
+        ~/.bin/kubectl config use-context default
+        rm -f ~/.kube/*.pem
+        cat ~/.kube/config
+      env:
+        TOKEN: ${{ secrets.TF_API_TOKEN }}
+        KUBE_HOST: ${{ secrets.TF_VAR_K8S_SERVER_URL }}
+        KUBE_CERTIFICATE: ${{ secrets.KUBE_CERTIFICATE }}
+
+    - name: Apply CRDs
+      run: |
+        ~/.bin/kubectl apply -f cert-manager/cert-manager.yaml
+        ~/.bin/kubectl apply -f snapshotter/snapshot.storage.k8s.io_volumesnapshotclasses.yaml
+        ~/.bin/kubectl apply -f snapshotter/snapshot.storage.k8s.io_volumesnapshotcontents.yaml
+        ~/.bin/kubectl apply -f snapshotter/snapshot.storage.k8s.io_volumesnapshots.yaml
